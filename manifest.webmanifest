@@ -1,0 +1,15 @@
+{
+  "name": "Olive Tasting",
+  "short_name": "Olive Tasting",
+  "description": "Blind olive oil tastings: simple guest score cards, an IOC-style panel sheet and live results.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f2e7",
+  "theme_color": "#2f3a12",
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
