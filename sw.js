@@ -1,5 +1,5 @@
-const CACHE = 'olive-tasting-v1';
-const CORE = ['./', 'index.html', 'app.js', 'app.css', 'lib/qrcode.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-512.png'];
+const CACHE = 'olive-tasting-v2';
+const CORE = ['./', 'index.html', 'app.js', 'app.css', 'lib/qrcode.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-512.png', 'sheet-script.gs'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener('fetch', e => {

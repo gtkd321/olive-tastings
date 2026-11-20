@@ -75,7 +75,10 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const view = $('#view');
 let route = { name: 'home' };
-function go(name, params = {}) { route = { name, ...params }; render(); view.focus({ preventScroll: true }); window.scrollTo(0, 0); }
+function go(name, params = {}) {
+  if (name === 'done' && params.card) { const c = db.cards.find(x => x.id === params.card); if (c) { c.finished = true; save(); pushCards(ev(), [c]); } }
+  if (name === 'results' && ev() && ev().sheet && !ev().remote) pullSheet(ev(), true);
+  route = { name, ...params }; render(); view.focus({ preventScroll: true }); window.scrollTo(0, 0); }
 let toastTimer;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), 2600); }
 function sheet(html, onMount) {
@@ -195,7 +198,7 @@ function expandCard(k, eventId) {
   return { id: k.id, eventId, type: k.t === 'g' ? 'guest' : 'panel', taster: k.n || 'Guest', date: k.d || today(), s };
 }
 const baseUrl = () => location.href.split('#')[0];
-async function joinLink(e) { return baseUrl() + '#join=' + await pack({ v: 1, id: e.id, name: e.name, date: e.date, n: e.oils.length }); }
+async function joinLink(e) { return baseUrl() + '#join=' + await pack({ v: 1, id: e.id, name: e.name, date: e.date, n: e.oils.length, ...(e.sheet ? { s: e.sheet } : {}) }); }
 async function resultLink(e, c) { return baseUrl() + '#r=' + await pack({ v: 1, e: { id: e.id, name: e.name, date: e.date, n: e.oils.length }, c: compactCard(c) }); }
 function qrSvg(text) {
   try { const q = qrcode(0, 'L'); q.addData(text); q.make(); return q.createSvgTag({ cellSize: 4, margin: 2, scalable: true }); }
@@ -205,6 +208,7 @@ function findOrAddEvent(meta, remote) {
   let e = db.events.find(x => x.id === meta.id);
   if (!e) { e = makeEvent(meta.name, meta.n || 10); e.id = meta.id; e.date = meta.date || today(); e.remote = !!remote; db.events.push(e); }
   else if ((meta.n || 0) > e.oils.length) setOilCount(e, meta.n);
+  if (remote && meta.s && validSheet(meta.s)) e.sheet = meta.s;
   return e;
 }
 async function handleHash() {
@@ -222,6 +226,98 @@ async function handleHash() {
   } catch (err) { clearHash(); toast('That link could not be read'); render(); }
 }
 function clearHash() { try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { location.hash = ''; } }
+
+
+// ------------------------------------------------------------------ Google Sheet sync
+// The host's own Apps Script web app (see sheet-script.gs). Cards are sent as text/plain so no CORS preflight is needed.
+const validSheet = u => /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(String(u || '').trim()) || /^http:\/\/127\.0\.0\.1:\d+\/exec$/.test(String(u || ''));
+const syncState = {}; // card id -> 'sending' | 'ok' | 'fail'
+function sheetRows(e, c) {
+  const rows = [];
+  for (const o of e.oils) {
+    const r = c.s[o.slot]; if (!r || !Object.keys(r).length) continue; const g = c.type === 'guest';
+    const row = { glass: o.slot, oil: e.remote ? '' : o.name, cup_code: o.code || '', taster_type: c.type, taster: c.taster,
+      flavors: (r.flavors || []).join('; '), off: (r.off || []).join('; '), pair: (r.pair || []).join('; '), comment: r.comment || '' };
+    if (g) Object.assign(row, { like_1_5: r.like, aroma_0_3: r.fruity, style: r.style, bitter_0_3: r.bitter, pepper_0_3: r.pepper, buy: r.buy, body_1_3: r.body, finish_1_3: r.finish });
+    else { Object.assign(row, { fruity_0_10: r.fruity, fruity_type: r.ftype, bitter_0_10: r.bitter, pungent_0_10: r.pungent, other: r.other, other_int: r.other_int }); DEFECTS.forEach(d => { row[d[0]] = r[d[0]]; }); }
+    for (const k in row) if (row[k] === undefined || row[k] === null) row[k] = '';
+    rows.push(row);
+  }
+  return rows;
+}
+async function postSheet(url, payload) {
+  const body = JSON.stringify(payload);
+  try {
+    const res = await fetch(url, { method: 'POST', body, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, redirect: 'follow' });
+    const j = await res.json(); if (!j.ok) throw new Error(j.error || 'Sheet said no'); return true;
+  } catch (err) {
+    if (err instanceof TypeError) { await fetch(url, { method: 'POST', body, mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' } }); return true; } // response unreadable, request still delivered
+    throw err;
+  }
+}
+const evMeta = e => ({ id: e.id, name: e.name, date: e.date });
+async function pushCards(e, cards, withOils) {
+  if (!e || !e.sheet || !cards.length && !withOils) return null;
+  cards.forEach(c => { syncState[c.id] = 'sending'; }); refreshSync();
+  const payload = { v: 1, event: evMeta(e), cards: cards.map(c => ({ id: c.id, json: c, rows: sheetRows(e, c) })) };
+  if (withOils || !e.remote) payload.oils = e.remote ? undefined : e.oils;
+  try {
+    await postSheet(e.sheet, payload);
+    const t = Date.now(); cards.forEach(c => { c.synced = t; syncState[c.id] = 'ok'; }); save(); refreshSync(); return true;
+  } catch (err) { cards.forEach(c => { syncState[c.id] = 'fail'; }); refreshSync(); return false; }
+}
+function pendingCards(e) { return cardsOf(e).filter(c => c.finished && (!c.synced || (c.updated || 0) > c.synced)); }
+async function retryPending() { for (const e of db.events) if (e.sheet) { const p = pendingCards(e); if (p.length) await pushCards(e, p); } }
+async function pullSheet(e, quiet) {
+  try {
+    const res = await fetch(e.sheet + '?event=' + encodeURIComponent(e.id)); const j = await res.json(); if (!j.ok) throw 0;
+    let added = 0, changed = 0;
+    for (const c of j.cards || []) {
+      if (!c || !c.id) continue; c.eventId = e.id; const i = db.cards.findIndex(x => x.id === c.id);
+      if (i < 0) { db.cards.push({ ...c, synced: Date.now() }); added++; }
+      else if ((c.updated || 0) > (db.cards[i].updated || 0)) { db.cards[i] = { ...c, synced: Date.now() }; changed++; }
+    }
+    save();
+    if (added || changed) { if (route.name === 'results' || route.name === 'home') keepScroll(render); if (!quiet || added) toast(`${added} new card${added === 1 ? '' : 's'} from the sheet`); }
+    else if (!quiet) toast('Up to date with the sheet');
+    return true;
+  } catch (err) { if (!quiet) toast('Could not reach the Google Sheet'); return false; }
+}
+function syncLine(e, c) {
+  if (!e.sheet) return '';
+  const st = syncState[c.id] || (c.synced && (c.updated || 0) <= c.synced ? 'ok' : 'fail');
+  const msg = st === 'sending' ? 'Saving to the Google Sheet…' : st === 'ok' ? (e.remote ? 'Sent to the host automatically. You can close this page.' : 'Saved to your Google Sheet.') : 'Not saved to the Google Sheet yet. It will try again when you are online.';
+  return `<p class="sync ${st}" id="syncLine">${msg}${st === 'fail' ? ' <button class="linkish" id="retrySync">Try now</button>' : ''}</p>`;
+}
+function refreshSync() {
+  const el = $('#syncLine'); if (!el || route.name !== 'done') return; const c = db.cards.find(x => x.id === route.card); if (!c) return;
+  el.outerHTML = syncLine(ev(), c); $('#retrySync')?.addEventListener('click', () => pushCards(ev(), [c]));
+}
+async function fetchScript() { const r = await fetch('sheet-script.gs'); return r.text(); }
+function sheetHelp() {
+  sheet(`<h2>Connect a Google Sheet</h2>
+  <p>Every finished card, from any phone, is added to your own sheet. About five minutes, once.</p>
+  <ol class="steps">
+    <li>Open <a href="https://sheets.new" target="_blank" rel="noopener">sheets.new</a> to make a blank Google Sheet. Name it <b>Olive Tastings</b>.</li>
+    <li>In the sheet, choose <b>Extensions › Apps Script</b>. Delete the sample code, paste the script, and press <b>Save</b>.<br><button class="btn" id="copyScript" type="button">Copy the script</button></li>
+    <li>Choose <b>Deploy › New deployment</b>. Click the gear, pick <b>Web app</b>. Set <b>Execute as: Me</b> and <b>Who has access: Anyone</b>. Press <b>Deploy</b>.</li>
+    <li>Google asks you to authorize. If it says the app isn't verified, choose <b>Advanced › Go to … (unsafe)</b>. It is your own script, only touching this sheet.</li>
+    <li>Copy the <b>Web app URL</b> (it ends in <b>/exec</b>) and paste it into the box on the Oils tab. Press <b>Test</b>.</li>
+  </ol>
+  <p class="muted">Then make a fresh invite. Phones that join from it send their cards to the sheet on their own. "Anyone" means anyone holding the link can add rows, so share it only through your invites.</p>
+  <div class="row end"><a class="btn ghost" href="sheet-script.gs" target="_blank" rel="noopener">View script</a><button class="btn primary" data-close>Done</button></div>`,
+  s => s.querySelector('#copyScript').addEventListener('click', async () => { try { await navigator.clipboard.writeText(await fetchScript()); toast('Script copied'); } catch (e) { toast('Use View script, then copy it'); } }));
+}
+async function testSheet() {
+  const e = ev(); if (!e.sheet) return toast('Paste the Web app URL first');
+  const b = $('#testSheet'); if (b) { b.disabled = true; b.textContent = 'Testing…'; }
+  let ok = false;
+  try { const r = await fetch(e.sheet); const j = await r.json(); ok = j.ok && j.app === 'olive-tasting'; } catch (err) { ok = false; }
+  if (ok) { await pushCards(e, cardsOf(e).filter(c => c.finished), true); toast('Connected. Oils and finished cards sent.'); e.sheetOk = Date.now(); save(); }
+  else toast('No answer. Check the URL ends in /exec and access is set to Anyone.');
+  keepScroll(render);
+}
+window.addEventListener('online', retryPending);
 
 // ------------------------------------------------------------------ exports
 function download(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
@@ -368,9 +464,9 @@ function renderDone() {
   } else {
     body = `<h2 class="sec">Your calls</h2><div class="tbl"><table><thead><tr><th>Sample</th><th>Fruity</th><th>Defect</th><th>Your call</th></tr></thead><tbody>${e.oils.map(o => { const r = ioc(panelRows({ ...e }, o.slot).length ? [{ ...(c.s[o.slot] || {}) }] : []); return r ? `<tr><td>${o.slot}</td><td>${f1(r.Mf)}</td><td>${r.Me ? f1(r.Me) + ' ' + esc(r.worst) : 'none'}</td><td>${catTag(r)}</td></tr>` : ''; }).join('')}</tbody></table></div><p class="muted">Your sheet only. The official call uses the whole panel's medians in Results.</p>`;
   }
-  return `<section class="hero small"><p class="eyebrow">Thank you</p><h1>${esc(c.taster)}, you're done</h1></section>${body}
+  return `<section class="hero small"><p class="eyebrow">Thank you</p><h1>${esc(c.taster)}, you're done</h1>${syncLine(e, c)}</section>${body}
   <div class="stack">
-    ${e.remote ? `<button class="btn primary wide" id="sendBtn">Send my scores to the host</button>` : `<button class="btn primary wide" data-go="start" data-type="${c.type}">Next ${c.type === 'guest' ? 'guest' : 'taster'}</button><button class="btn wide" data-go="results">See results</button>`}
+    ${e.remote ? `<button class="btn ${e.sheet ? '' : 'primary '}wide" id="sendBtn">${e.sheet ? 'Show my scores code (backup)' : 'Send my scores to the host'}</button>` : `<button class="btn primary wide" data-go="start" data-type="${c.type}">Next ${c.type === 'guest' ? 'guest' : 'taster'}</button><button class="btn wide" data-go="results">See results</button>`}
     <button class="btn ghost wide" data-open="${c.id}">Change my answers</button>
   </div>`;
 }
@@ -402,6 +498,7 @@ function renderResults() {
   <label class="switch"><input type="checkbox" id="reveal" ${e.reveal ? 'checked' : ''}><span class="track"></span><span>Reveal oil names</span></label>
   <div class="seg" role="tablist">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${tab === k}" class="${tab === k ? 'on' : ''}" data-rtab="${k}">${l}</button>`).join('')}</div>
   ${body}
+  ${e.sheet && !e.remote ? `<h2 class="sec">Google Sheet</h2><div class="row wrap gap"><button class="btn primary" id="pullSheet">Get new cards from the sheet</button><button class="btn" id="pushAll">Send all cards to the sheet</button></div><p class="muted">Cards from guests' phones arrive in the sheet on their own. Opening Results also checks for new ones.</p>` : ''}
   <h2 class="sec">Take it with you</h2>
   <div class="row wrap gap"><button class="btn" id="csvBtn">Spreadsheet (CSV)</button><button class="btn" id="obsBtn">Obsidian cards (.zip)</button><button class="btn ghost" id="backupBtn">Backup</button><button class="btn ghost" id="importBtn">Import</button></div>`;
 }
@@ -450,6 +547,13 @@ function renderSetup() {
       <label class="field"><span>Blind code <small>shown to guests on their card, so write it on the cup</small></span><input data-k="code" value="${esc(o.code)}" inputmode="numeric" maxlength="6" placeholder="e.g. 318"></label>
       <label class="field"><span>Notes</span><textarea data-k="notes" rows="2">${esc(o.notes)}</textarea></label>
     </div>` : ''}</li>`).join('')}</ul>
+  <h2 class="sec">Google Sheet <small>optional</small></h2>
+  <div class="stack">
+    <p class="muted">Collect every finished card in your own Google Sheet, including cards from guests' phones.</p>
+    <label class="field"><span>Web app URL</span><input id="sheetUrl" value="${esc(e.sheet || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" spellcheck="false" inputmode="url"></label>
+    ${e.sheet ? (e.sheetOk ? '<p class="sync ok">Connected. New invites will send cards here.</p>' : '<p class="sync">Saved. Press Test to check it.</p>') : ''}
+    <div class="row wrap gap"><button class="btn" id="sheetHelp">How to set it up</button>${e.sheet ? '<button class="btn primary" id="testSheet">Test</button>' : ''}</div>
+  </div>
   <div class="row wrap gap"><button class="btn danger ghost" id="delEvent">Delete this tasting</button></div>`;
 }
 function renderHelp() {
@@ -460,7 +564,8 @@ function renderHelp() {
     <p class="muted">On iPhone, open these links in Safari on the host phone, the same place you run the app. A home-screen copy of the app keeps its own separate storage.</p>
     <h2>Two kinds of scoring</h2><p><b>Guest cards</b> use plain words: how much you like it, smell strength, green or ripe, bitterness, peppery kick, and whether you'd buy it. <b>Expert panel sheets</b> follow the International Olive Council method: intensity of each defect, fruity, bitter and pungent on a 0 to 10 scale, graded from the panel's medians.</p>
     <h2>With your Obsidian vault</h2><p>In Results, <b>Obsidian cards (.zip)</b> gives you notes in the same format as the Olive Oil Tastings vault. Unzip it into the vault folder and the Tasting Dashboard picks the cards up. Glass 01 links to Oil 01, and so on.</p>
-    <h2>Your data</h2><p>No account, nothing uploaded. Everything stays in this browser. Use <b>Backup</b> to move a tasting to another device.</p>
+    <h2>Collect cards in a Google Sheet</h2><p>On the Oils tab, connect your own Google Sheet once. Every finished card, including cards from guests' phones, is then added as rows you can sort, chart or share. Results can pull those cards back in, so you see everyone's scores without scanning codes.</p>
+    <h2>Your data</h2><p>No account needed. Without a Google Sheet, everything stays in this browser. With one, cards go only to your sheet. Use <b>Backup</b> to move a tasting to another device.</p>
     <p class="muted">Grading follows <a href="https://www.internationaloliveoil.org/wp-content/uploads/2024/07/III-2.2.COI-T20-Doc.-15-REV-11-2024_EN-1.pdf" target="_blank" rel="noopener">COI/T.20/Doc. No 15, Rev. 11 (2024)</a>. Results here are informal, not an official certificate.</p>
   </div>`;
 }
@@ -477,7 +582,7 @@ function render() {
   document.body.classList.toggle('in-card', route.name === 'card');
   wire();
 }
-function currentRec() { const c = db.cards.find(x => x.id === route.card), e = ev(); const slot = e.oils[route.idx || 0].slot; return c.s[slot] || (c.s[slot] = {}); }
+function currentRec() { const c = db.cards.find(x => x.id === route.card), e = ev(); c.updated = Date.now(); const slot = e.oils[route.idx || 0].slot; return c.s[slot] || (c.s[slot] = {}); }
 function wire() {
   view.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', () => go(b.dataset.go, { type: b.dataset.type })));
   view.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => go('card', { card: b.dataset.open, idx: 0 })));
@@ -533,6 +638,14 @@ function wire() {
     const i = +inp.closest('[data-oilform]').dataset.oilform; ev().oils[i][inp.dataset.k] = inp.value; save();
     if (inp.tagName === 'SELECT') keepScroll(render); else { const h = inp.closest('li').querySelector('.oil-h strong'); if (inp.dataset.k === 'name') h.textContent = inp.value || 'Unnamed oil'; }
   }));
+  $('#sheetUrl')?.addEventListener('change', x => { const v = x.target.value.trim(), e = ev();
+    if (v && !validSheet(v)) { toast('That does not look like an Apps Script web app URL ending in /exec'); return; }
+    e.sheet = v || undefined; delete e.sheetOk; save(); keepScroll(render); if (v) toast('Saved. Press Test.'); });
+  $('#sheetHelp')?.addEventListener('click', sheetHelp);
+  $('#testSheet')?.addEventListener('click', testSheet);
+  $('#pullSheet')?.addEventListener('click', () => pullSheet(ev()));
+  $('#pushAll')?.addEventListener('click', async () => { const e = ev(), cs = cardsOf(e); const ok = await pushCards(e, cs, true); toast(ok ? `Sent ${cs.length} card${cs.length === 1 ? '' : 's'} and the oil list` : 'Could not reach the Google Sheet'); });
+  $('#retrySync')?.addEventListener('click', () => { const c = db.cards.find(x => x.id === route.card); if (c) pushCards(ev(), [c]); });
   $('#delEvent')?.addEventListener('click', () => confirmSheet('Delete this tasting?', `This removes ${ev().name} and its ${cardsOf(ev()).length} cards from this device. Make a backup first if you might need them.`, 'Delete', () => {
     const id = ev().id; db.cards = db.cards.filter(c => c.eventId !== id); db.events = db.events.filter(x => x.id !== id); db.active = null; save(); go('home'); }, true));
 }
@@ -582,6 +695,7 @@ document.addEventListener('keydown', x => { if (x.key === 'Escape' && !$('#sheet
 window.addEventListener('hashchange', handleHash);
 render();
 handleHash();
+retryPending();
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 window.__olive = { db: () => db, ioc, crowd };
 })();

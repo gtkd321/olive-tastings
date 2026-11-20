@@ -65,6 +65,7 @@ body.in-card .tabs { display: none; }
 body.in-card #view { padding-bottom: calc(40px + env(safe-area-inset-bottom)); }
 
 /* buttons */
+a.btn { text-decoration: none; color: inherit; }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; padding: 10px 18px; border-radius: 999px;
   border: 1.5px solid var(--line-2); background: var(--card); font-weight: 700; font-size: 15px; transition: background .15s, border-color .15s, transform .1s; }
 .btn:active { transform: scale(.98); }
@@ -269,3 +270,13 @@ details.deeper[open] summary::before { content: '−'; }
   padding: 12px 18px; border-radius: 999px; background: var(--ink); color: var(--paper); font-weight: 700; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; }
 .toast.on { opacity: 1; transform: translate(-50%, 0); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Google Sheet sync */
+.sync { margin: 10px 0 0; padding: 10px 14px; border-radius: var(--r-s); background: var(--paper); border: 1px solid var(--line); font-size: 14px; color: var(--ink-2); }
+.sync.ok { background: var(--olive-l); border-color: transparent; color: var(--ok); font-weight: 700; }
+.sync.fail { background: var(--gold-l); border-color: transparent; color: var(--ink); }
+.sync.sending { color: var(--muted); }
+.linkish { border: 0; background: none; padding: 0; color: var(--olive); font-weight: 700; text-decoration: underline; }
+.steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+.steps li { padding-left: 4px; }
+.steps .btn { margin-top: 8px; min-height: 40px; }
